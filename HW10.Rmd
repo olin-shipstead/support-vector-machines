@@ -1,0 +1,165 @@
+---
+title: "HW10"
+author: "Olin Shipstead"
+date: "April 23, 2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Question 1
+
+> *Analyze the forest fire data set (forestfires.csv in Data Archive > Support Vector Machines) using Support Vector Machines. See also the data set description located in the same directory. "area" is the response. Note that several of the attributes may be  correlated, thus it makes sense to apply some sort of feature selection. Also, the response is heavily skewed toward zero so a response transformation may be helpful. Detailed feature definitions are here: http://cwfis.cfs.nrcan.gc.ca/background/summary/fwi<br>*
+> *Follow the usual procedure by creating training and test data sets, tune the trained model then evaluate test performance. Report results in text and graphical form.*
+
+
+I will begin the SVM analysis by first importing the data set, extracting the relevant variables, and taking a peek at the data:
+
+```{r}
+
+fire <- read.csv("forestfires.csv", stringsAsFactors = F)[,c(5:13)]
+
+summary(fire)
+
+```
+
+The data consists of eight predictor variables and one response variable (area). Since I am concerned with predictor variable collinearity, I will perform a principal component analysis (PCA) of the data to determine which among the given predictors are most necessary:
+
+```{r}
+library(tidyverse, quietly = T)
+
+X <- as.matrix(fire %>% select(-area))
+pca <- prcomp(x = X, retx = T, center = T, scale. = T)
+
+var <- (pca$sdev)^2
+var.percent <- var/sum(var)*100
+
+plot(cumsum(var.percent), type='b', ylab="Cum. percent variance", xlab="Number of PCs")
+plot(pca$x[,1], pca$x[,2], col=ifelse(fire$area > 0, "red", "blue"))
+
+biplot(pca, cex=1.2, xlabs=rep(".", nrow(pca$x)))
+```
+
+The first plot is the cumulative scree plot of the PCA. This plot shows that in order to explain roughly 95% of the variance in the data, about 6 of the principal components are needed, which does not represent a major reduction in dimensionality from the original 8 variables. This is also represented in the second plot, which maps the points to their first and second principal components. There is almost no delineation between the points that had fire, marked in red, and the points without fire, marked in blue. This means that the first two principal components alone do not sufficiently explain trends in the data. 
+
+Finally, the last plot is a biplot of the PCA. This plot shows the collinearity of sets of predictor variables -- DC and DMC are highly collinear, as are temp, FFMC, and ISI. Since I would like to include only variables that meaningfully contribute to spanning the variation of the data set, I will exclude DC, FFMC, and ISI in the further analyses. This leaves me with five predictor variables and one resposne variable.
+
+In the last step of data pre-processing, I will transform those variables heavily scaled towards zero (rain and area) using the log1p function:
+
+
+```{r}
+fire <- fire %>% select(-DC, -FFMC, -ISI)
+fire$rain <- log1p(fire$rain)
+fire$area <- log1p(fire$area)
+
+summary(fire)
+```
+
+Now, I will begin creating the support vector machine (SVM). I will first partition the data into training and test sets and then build the initial SVM:
+
+```{r}
+library(e1071)
+
+set.seed(36)
+sel <- sample(nrow(fire), nrow(fire)*0.6)
+train <- fire[sel,]
+test <- fire[-sel,]
+
+svm1 <- svm(area~., data=train, kernel="radial", cost=10, gamma=1)
+summary(svm1)
+
+pred1 <- predict(svm1, newdata = test)
+expm1(sqrt(mean((pred1-test$area)^2)))
+```
+
+I set the parameters of the initial model to cost = 10 and gamma = 1. The root mean squared error of the initial SVM model, transformed back from log scale, is 3.825. This means that the SVM, on average, is 3.825 hectares off in its prediction of forest fire area burned. It should also be noted that the number of support vectors in this model is 287, which represents over 90% of training data points. With so many support vectors, the model is likely to be overfitted. Tuning the model parameters can perhaps yield better results:
+
+```{r}
+
+set.seed(1)
+tuning <-  tune.svm(area~., data=train, kernel="radial", gamma = 2^(-2:2), cost = 2^(1:2))
+svm2 <- tuning$best.model
+summary(svm2)
+
+pred2 <- predict(svm2, newdata = test)
+expm1(sqrt(mean((pred2-test$area)^2)))
+```
+
+Tuning the model over a range of parameters yields best results when cost = 2 and gamma = 0.25. Since the separations between response levels are not well-defined, the cost and gamma parameters should be small. The RMSE of the tuned model is 3.169 heactares, which represents a considerable reduction in error from the initial SVM. The number of support vectors has also decreased slightly to 277, so the SVM is less likely to be overfitted to the training data.
+
+The fit of the two SVM regressions can be assessed using the plots below:
+
+```{r}
+par(mfrow=c(1,2))
+plot(pred1 ~ test$area, xlab="Observed area burned", ylab="Predicted area burned", main="Initial SVM", ylim=c(-1,5))
+abline(c(0,1), col="red")
+plot(pred2 ~ test$area, xlab="Observed area burned", ylab="Predicted area burned", main="Tuned SVM", ylim=c(-1,5))
+abline(c(0,1), col="red")
+```
+
+These two plots show the performance of the two SVM models. In both plots, the red line represents the line of perfect fit, where the observed data matches the predicted data exactly. While both models overestimate the number of instances of forest fire in general (resulting in the vertical line of points at x=0), the tuned model does a better job of placing observations closer to the line of perfect fit. Since the response data is so heavily skewed towards zero, the models still have trouble identifying which observations will result in no fire whatsoever. If the response variable was transformed into a binary variable of fire/no fire, then perhaps the SVM would achieve high performance accuracy. The tuned SVM regression, however, is able to predict the area of forest fires with a RMSE of 3.169 hectares (or 31,690 sq meters). 
+
+
+
+
+## Question 2
+
+> *Analyze the Wisconsin breast cancer data (wdbc_data.csv in Data Archive > Support Vector Machines) using Support Vector Machines. The data description is found in the same directory. The categorical response is M or B (malignant or benign). Follow the usual procedure by creating training and test data sets, tune the trained model then evaluate test performance. Report results in text and graphical form.*
+
+This question involves created an SVM with a binary response variable, as opposed to the continuous resonse variable in the previous question. My analysis, however, will follow a similar workflow as before. I begin by reading in the data and taking a peek:
+
+
+```{r}
+wisc <- read.csv("wdbc_data.csv", header = F)
+head(wisc)
+
+wisc <- wisc %>% select(-V1)
+```
+
+The documentation reads that the first column is an ID number, the second column is the binary response variable (M for malignant or B for benign), and the following 30 columns are biological predictor variables. There are 569 observations in total. Since thirty predictor variables may lead to overfitting, I will perform PCA to reduce the dimensionality of the data:
+
+
+```{r}
+
+X <- as.matrix(wisc %>% select(-V2))
+pca <- prcomp(x = X, retx = T, center = T, scale. = T)
+
+var <- (pca$sdev)^2
+var.percent <- var/sum(var)*100
+
+plot(cumsum(var.percent), type='b', ylab="Cum. percent variance", xlab="Number of PCs")
+# over 95% variance explained via 10 PCs
+
+p <- data.frame(pca$x[,1:10],V2 = wisc$V2) # level 2 = Malignant, level 1 = Benign
+
+set.seed(89)
+sel <- sample(nrow(p), nrow(p)*0.6)
+train <- p[sel,]
+test <- p[-sel,]
+
+tuning <-  tune.svm(V2~., data=train, kernel="radial", cost = 2^(-4:4))
+SVM <- tuning$best.model
+summary(SVM)
+
+
+```
+
+As with the previous data set, the cumulative scree plot is shown. Over 95% of the variance is explained by just the first ten principal components, so I use those ten components to develop the binary SVM. I develop the SVM by tuning it using the training data and an array of values for the cost parameter. The model that performs the best on the training set has a cost parameter of 1 and includes 136 support vectors out of a total of 341. 
+
+The results of the tuned model on the testing data can be explored via the two visualizations below:
+
+```{r}
+pred <- predict(SVM, newdata = test)
+caret::confusionMatrix(pred, reference = test$V2)
+
+plot(SVM, data=test, PC2~PC1)
+
+```
+
+First, the confusion matrix of the model is displayed. The model correctly classifies 95% of the testing data points as either benign (B) or malignant (M), with a sensitivity of 0.96 and a specificity of 0.94. These results are displayed visually in the following plot, which maps points according to their principal components. The points labeled with an "X" are the support vectors, and the points labeled with an "O" are not. The background shading of the plot represents the nonlinear decision boundary of the SVM, with the malignant points plotted in red and the benign points plotted in black. Qualitatively, the SVM model does a very good job in classifying the points in the training data set, so it is likely not overfitted on the training data.
+
+
